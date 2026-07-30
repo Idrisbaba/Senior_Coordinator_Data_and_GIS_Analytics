@@ -1,0 +1,36 @@
+project:
+  type: book
+
+book:
+  title: "Senior Coordinator, Data & GIS Analytics – Technical Assessment"
+  author: "Idris"
+  date: "July 30th 2026"
+  chapters:
+    - index.qmd
+    - 01_overview.qmd
+    - 02_data_engineering.qmd
+    - 03_analysis.qmd
+    - 04_visualization.qmd
+    - 05_decision_grade.qmd
+    - 06_capacity_building.qmd
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-tools: true
+  pdf:
+    documentclass: scrreprt
+    number-sections: true
+    toc: true
+
+execute:
+  freeze: auto
+  warning: false
+  message: false
+
+editor: visual
+
