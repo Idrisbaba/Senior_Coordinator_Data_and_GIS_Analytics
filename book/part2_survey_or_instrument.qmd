@@ -1,6 +1,6 @@
 ---
-title: "Capacity Building and Reproducible Systems"
-author: "Idris"
+title: "Data collection instrument design and survey inference"
+author: "Idris Baba"
 format: html
 editor: visual
 ---

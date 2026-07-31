@@ -1,6 +1,6 @@
 ---
-title: "Interpretations"
-author: "Idris"
+title: "Capability development and technical coordination"
+author: "Idris Baba"
 format: html
 editor: visual
 ---

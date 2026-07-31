@@ -7,12 +7,10 @@ book:
   date: "July 30th 2026"
   chapters:
     - index.qmd
-    - 01_overview.qmd
-    - 02_data_engineering.qmd
-    - 03_analysis.qmd
-    - 04_visualization.qmd
-    - 05_decision_grade.qmd
-    - 06_capacity_building.qmd
+    - part1_geospatial.qmd
+    - part2_survey_or_instrument.qmd
+    - part3_coordination.qmd
+    - references.qmd
 
 format:
   html:
@@ -22,6 +20,7 @@ format:
     number-sections: true
     code-fold: true
     code-tools: true
+
   pdf:
     documentclass: scrreprt
     number-sections: true
@@ -33,4 +32,3 @@ execute:
   message: false
 
 editor: visual
-

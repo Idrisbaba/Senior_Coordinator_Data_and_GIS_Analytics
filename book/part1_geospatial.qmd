@@ -1,5 +1,5 @@
 ---
-title: "Data Engineering Foundations"
+title: "Overview and AnalAdvanced geospatial analysis and reproducible processingytical Strategy"
 author: "Idris"
 format: html
 editor: visual
