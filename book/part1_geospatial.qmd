@@ -33,7 +33,7 @@ This notebook is structured around the six required components.
 
 *Advanced geospatial analysis, advanced analytics, data engineering foundations, decision-grade visualization, and capacity building*.
 
-**Load Libraries & Cleaned Geopakage**
+1.  **Load Libraries**
 
 ```{r}
 # Core geospatial + tidy tools
@@ -56,9 +56,11 @@ library(spatstat)
 
 **Reproducibility note:** All file paths use `here::here()`, ensuring that anyone who downloads the project can run this notebook without modifying paths
 
-3.  **1 Load GeoPackage & Raw Operational Data (Requirement 1)**
+2.  **Load Data from cleaned Data engineered Geopackage data analysed in python. So that we can continue our advanced analysis**
 
-    3.2 Load GeoPackage
+```         
+2.1 Load GeoPackage
+```
 
 ```{r}
 # Reproducibility: all paths via here::here()
@@ -71,9 +73,6 @@ sf::st_layers(gpkg)
 ```
 
 ## Load spatial layers
-
-
-
 
 ```{r}
 # Load spatial layers
@@ -119,6 +118,8 @@ Our QA rules included:
 
 -   **Stationary clusters** (device left in one place)
 
+## Before mapping, we inspect the cleaned GPS dataset to understand its structure and confirm QA rules were applied.
+
 ```         
 ```
 
@@ -131,8 +132,27 @@ head(gps_tracks_clean, 10)
 
 ```
 
+## Above we can that
 
-#It's always important to align our coordinates the same to be able to plot
+The summary shows:
+
+-   All points have `qa_flag == FALSE` → meaning they passed QA
+
+-   Geometry type is **POINT**
+
+-   CRS is **WGS84 (EPSG:4326)**
+
+-   Longitude ≈ 7–11°, Latitude ≈ 11° → consistent with northern Nigeria
+
+This confirms the dataset is valid and ready for mapping.
+
+### It's always important and very critical to align our coordinates system
+
+Our wards are almost certainly in a **projected CRS** (e.g., UTM or Web Mercator), while GPS tracks are in **WGS84**.
+
+If two layers have different CRS, **tmap will plot them in different coordinate spaces**, making one layer invisible.
+
+Therefore we will check CRS:
 
 ```{r}
 st_crs(gps_tracks_clean)
@@ -140,10 +160,7 @@ st_crs(wards)
 
 ```
 
-
-
-## Now let's reproject 
-
+### We will now reproject to the same CRS
 
 ```{r}
 gps_tracks_clean <- st_transform(gps_tracks_clean, st_crs(wards))
@@ -151,33 +168,58 @@ gps_tracks_clean <- st_transform(gps_tracks_clean, st_crs(wards))
 
 ```
 
+### (Why this matters)
 
+Spatial layers must share the same coordinate system to be plotted together. This step ensures GPS points align perfectly with ward polygons.
+
+### Inspect geometry and bounding box
+
+#### This step helps in confirming the data is spatially reasonable.
+
+```{r}
+
+print(gps_tracks_clean[1:10, ])
+st_bbox(gps_tracks_clean)
+
+```
 
 ## Now a quick plot to see the alignment of our tracks
+
+#### Plot GPS Points Over Ward Boundaries (Visual QA)
 
 ```{r}
 tmap_mode("plot")
 
 tm_shape(wards) +
-  tm_polygons(col = "grey90", border.col = "grey70") +
+  tm_polygons(
+    col = "grey90",
+    border.col = "grey70",
+    lwd = 0.5
+  ) +
 tm_shape(gps_tracks_clean) +
-  tm_dots(col = "steelblue", size = 0.05) +
+  tm_dots(
+    col = "steelblue",
+    size = 0.03,
+    alpha = 0.6
+  ) +
 tm_layout(
-  title = "Cleaned GPS Tracks over Ward Boundaries",
-  frame = FALSE
-)
+    title = "Cleaned GPS Tracks Over Ward Boundaries",
+    frame = FALSE,
+    legend.outside = TRUE
+  )
 
 
 ```
 
+#### The plot above confirms:
 
+-   GPS points fall inside ward polygons
 
+-   QA cleaning preserved spatial structure
 
+-   Movement density is realistic for a 5‑day SIA
 
-
-
-
-
+-   No CRS mismatch remains
 
 ## Summary statistics
 
@@ -206,54 +248,83 @@ gps_tracks_attributed
 
 ```
 
-## Settlement visit counts
+### Settlement visit counts from attributed GPS tracks
+
+#### We drop geometry to work with attributes only, then count how many GPS fixes are associated with each settlement_id. This gives an empirical measure of how often teams were present in each settlement.
 
 ```{r}
+
 
 gps_visits <- gps_tracks_attributed %>%
   st_drop_geometry() %>%
   group_by(settlement_id) %>%
   summarise(visits = n())
 
-head(gps_visits)
+# Inspect distribution to check for realism (right-skewed, many small, few large)
 summary(gps_visits$visits)
 
-
-```
-
-#### Settlement visit counts ranged from 1 to 1,877 GPS fixes, with a median of 54. This distribution is operationally realistic for a five‑day house‑to‑house SIA. Smaller rural settlements typically generated fewer fixes due to limited movement, while larger or urban settlements produced hundreds of fixes due to dense street networks, repeated visits, and multipath effects. The right‑skewed distribution is characteristic of GPS movement data and indicates that settlement attribution performed correctly.
-
-## Coverage + Reconciliation (Requirement 4)
-
-```{r}
-etally <- etally %>%
-  rename(
-    doses = doses_administered,
-    target_u5 = target_population_under5
+# Visual check: histogram of visit counts
+ggplot(gps_visits, aes(x = visits)) +
+  geom_histogram(binwidth = 25, fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of GPS Visit Counts per Settlement",
+    x = "Number of GPS fixes",
+    y = "Number of settlements"
   )
 
+
+
 ```
 
+### Here we check the column name and structure for Etally
+
 ```{r}
+names(etally)
+glimpse(etally)
+```
+
+#### Prepare e-tally data and merge with settlements
+
+```{r}
+
+etally_sett <- etally %>%
+  group_by(settlement_id) %>%
+  summarise(
+    doses     = sum(doses,     na.rm = TRUE),
+    target_u5 = max(target_u5, na.rm = TRUE)
+  )
+
+glimpse(etally_sett)
+
+```
+
+### Merge GPS visits + e-tally onto settlement geometry
+
+```{r}
+
 sett_cov <- settlements %>%
-  left_join(gps_visits, by = "settlement_id") %>%
+  left_join(gps_visits,  by = "settlement_id") %>%
   left_join(etally_sett, by = "settlement_id") %>%
   mutate(
+    # Replace missing values with 0 to avoid NA-driven logic errors.
     visits = replace_na(visits, 0),
     doses  = replace_na(doses, 0),
+
+    # Binary coverage flags
     track_covered  = visits > 0,
     etally_covered = doses > 0
   )
 
-head(sett_cov)
+glimpse(sett_cov)
 
 ```
 
-#### The merged settlement‑level coverage table shows realistic patterns of agreement and discrepancy between GPS‑derived coverage and e‑tally reporting. Most settlements exhibit concordance (track_covered = TRUE and etally_covered = TRUE), indicating that teams both visited and recorded doses. A minority of settlements show track‑only coverage (TRUE / FALSE), where GPS confirms a visit but e‑tally reports zero doses. These discrepancies are operationally plausible and may arise from reporting gaps, settlements with few or no eligible children, logger proximity effects, or incomplete e‑tally submission. This behaviour confirms that the reconciliation logic is functioning correctly and reflects real‑world campaign dynamics.
+## Coverage classification
 
-## Discrepancy classification
+##### Coverage classification is performed to reconcile GPS‑derived movement data with e‑tally dose reporting By categorising each settlement into agreement, GPS‑only, e‑tally‑only, or neither, we identify true missed settlements, reporting discrepancies, and GPS gaps This classification is essential for ward‑level coverage metrics, spatial clustering (Local Moran’s I), and operational mop‑up planning.
 
 ```{r}
+# Coverage classification
 sett_cov <- sett_cov %>%
   mutate(
     cov_class = case_when(
@@ -264,10 +335,32 @@ sett_cov <- sett_cov %>%
     )
   )
 
+# Print distribution
 table(sett_cov$cov_class)
 
 
+
 ```
+
+### Now we visulise coverage classes
+
+```{r}
+
+ggplot(st_drop_geometry(sett_cov), aes(x = cov_class)) +
+  geom_bar(fill = "steelblue") +
+  labs(
+    title = "Settlement Coverage Classification",
+    x = "Coverage class",
+    y = "Number of settlements"
+  )
+
+```
+
+### The plot above provides a clear Idea of coverage agreement and discrepancy between GPS and e‑tally It validates the reconciliation logic and reveals the operational balance between fully covered settlements, reporting gaps, GPS gaps, and true missed settlements, This distribution informs ward‑level aggregation and forms the basis for spatial clustering using Local Moran’s I.
+
+### Aggregate settlement coverage to wards
+
+###### We summarise settlement-level metrics to ward-level performance indicators, This is essential because mop-up decisions are made at ward level.
 
 ```{r}
 
@@ -293,7 +386,51 @@ head(ward_cov)
 
 ```
 
+#### Join ward coverage metrics back to ward polygons
+
+```{r}
+wards_cov <- wards %>%
+  left_join(ward_cov, by = "ward_code")
+
+```
+
+```{r}
+tmap_mode("plot")
+
+tm_shape(wards_cov) +
+  tm_polygons(
+    col     = "track_cov_pct",
+    palette = "Blues",
+    style   = "quantile",
+    title   = "GPS Track Coverage (%)"
+  ) +
+tm_layout(
+  title          = "Ward-Level GPS Coverage",
+  frame          = FALSE,
+  legend.outside = TRUE
+)
+
+```
+
+### Why this plot is essential
+
+This map reveals:
+
+-   which wards have strong GPS‑confirmed coverage
+
+-   which wards have weak or missing coverage
+
+-   spatial patterns that may indicate operational issues
+
+-   areas requiring mop‑up or supervision
+
 # Local Moran’s I for Missed Settlements (Requirement 5)
+
+### Now we prepare for Local Moran’s I
+
+#### Local Moran’s I requires a binary indicator of “missed” vs “not missed”.
+
+### Why Moran's I We apply Local Moran’s I to identify spatial clusters of missed settlements. Immunisation coverage failures are rarely random; they tend to cluster due to terrain, access constraints, team routing, or supervision gaps. Local Moran’s I detects these localised hotspots by comparing each settlement’s missed status with its neighbours within a 10 km radius. This produces interpretable cluster types (High‑High, Low‑Low, High‑Low, Low‑High) that directly inform mop‑up prioritisation and operational decision‑making.
 
 ```{r}
 
@@ -303,9 +440,10 @@ sett_cov <- sett_cov %>%
   )
 
 
+
 ```
 
-### Ensure geometry is projected (critical)
+### Ensure geometry is projected to a metric CRS
 
 -   Local Moran’s I requires a projected CRS (meters), not WGS84.
 
@@ -319,67 +457,40 @@ sett_cov_proj <- st_transform(sett_cov, 3857)
 
 #### Explanation of the Choice of a 10 km Spatial Neighborhood
 
-The Local Moran’s I statistic requires that every spatial unit has at least one neighbor; otherwise, the spatial weights matrix cannot be constructed and the statistic cannot be computed. Because our analysis is based on point settlements rather than polygons, contiguity is not meaningful, and distance-based neighbors are required.
+### The Local Moran’s I statistic requires that every spatial unit has at least one neighbor; otherwise, the spatial weights matrix cannot be constructed and the statistic cannot be computed. Because our analysis is based on point settlements rather than polygons, contiguity is not meaningful, and distance-based neighbors are required.
 
-We therefore tested multiple distance thresholds to identify the smallest operationally defensible neighborhood that ensures full spatial connectivity:
+#### We therefore tested multiple distance thresholds to identify the smallest operationally defensible neighborhood that ensures full spatial connectivity:
+
+## Build 10 km neighbour structure
 
 ```{r}
-coords <- st_coordinates(sett_cov_proj)
 
-nb_10km <- dnearneigh(coords, 0, 10000)
-summary(nb_10km)
+coords   <- st_coordinates(sett_cov_proj)
+nb_10km  <- dnearneigh(coords, 0, 10000)
+lw       <- nb2listw(nb_10km, style = "W")
 
 
 ```
 
 #### A 10 km distance threshold was selected for the Local Moran’s I analysis because it is the smallest operationally defensible neighborhood that ensures full spatial connectivity across all 2,562 settlements. Lower thresholds (1–8 km) produced large numbers of isolated settlements with no neighbors, preventing construction of a valid spatial weights matrix. The 10 km threshold aligns with rural settlement spacing and the typical daily movement radius of vaccination teams, and provides a stable basis for detecting statistically significant clusters of missed settlements. This choice is therefore both statistically necessary and operationally meaningful for rural SIA analysis.
 
-## 3. Convert neighbor list into a spatial weights matrix
+## Compute Local Moran’s I
 
 ```{r}
-
-# spatial weights required by localmoran().
-# This step only works because 10 km produced full connectivity.
-lw <- nb2listw(nb_10km, style = "W")
-
-
-
-```
-
-### 4. Convert the logical 'missed' variable to numeric
-
-```{r}
-
-# Local Moran's I requires a numeric vector.
-# TRUE/FALSE becomes 1/0, which is valid for binary cluster detection.
 sett_cov_proj$missed_num <- as.numeric(sett_cov_proj$missed)
-```
 
-## \# 5. Compute Local Moran's I
-
-```{r}
-# The last column is the p-value.
 local_moran <- localmoran(sett_cov_proj$missed_num, lw)
 
-```
-
-### We will Attach Local Moran's I results back to the sf object
-
-```{r}
-
 sett_cov_proj$Ii     <- local_moran[, "Ii"]
-sett_cov_proj$E_Ii   <- local_moran[, "E.Ii"]
-sett_cov_proj$Var_Ii <- local_moran[, "Var.Ii"]
 sett_cov_proj$Z_Ii   <- local_moran[, "Z.Ii"]
 sett_cov_proj$p_Ii   <- local_moran[, "Pr(z != E(Ii))"]
 
 
 ```
 
-## 7. Classify cluster types based on Z-score and p-value
+## We will then classify cluster types
 
 ```{r}
-
 sett_cov_proj <- sett_cov_proj %>%
   mutate(
     cluster_type = case_when(
@@ -391,418 +502,600 @@ sett_cov_proj <- sett_cov_proj %>%
     )
   )
 
-
 ```
 
-```         
-```
+### Why the above matters
+
+Cluster types reveal:
+
+-   **High‑High** → hotspots of missed settlements
+
+-   **Low‑Low** → clusters of well‑covered settlements
+
+-   **High‑Low / Low‑High** → spatial outliers
+
+-   **Not Significant** → no spatial pattern
+
+This is the core of your spatial clustering analysis.
+
+\`
+
+## Visualisation of Map
 
 ```{r}
-breaks1 <- c(-1000, -2.58, -1.96, -1.65, 1.65, 1.96, 2.58, 1000)
+library(tmap)
 
-
-```
-
-```{r}
-library(RColorBrewer)
-MoranColours <- rev(brewer.pal(7, "RdGy"))
-
-
-```
-
-```{r}
-wards_Z <- wards %>%
-  left_join(
-    sett_cov_proj %>%
-      st_drop_geometry() %>%
-      group_by(ward_name) %>%
-      summarise(Z_Ii_mean = mean(Z_Ii, na.rm = TRUE)),
-    by = "ward_name"
-  )
-
-```
-
-```{r}
 tmap_mode("plot")
 
-tm_shape(wards_Z) +
-  tm_polygons(
-    col = "Z_Ii_mean",
-    palette = MoranColours,
-    style = "fixed",
-    breaks = breaks1,
-    title = "Local Moran's I (Z-score)"
-  ) +
-  tm_layout(
-    title = "Local Moran’s I Z-Score Map of Settlement Coverage",
-    title.size = 1.2,
-    legend.outside = TRUE,
-    legend.outside.position = "right",
-    frame = FALSE,
-    bg.color = "white"
-  ) +
-  tm_scale_bar(position = c("left", "bottom")) +
-  tm_compass(type = "8star", position = c("right", "top"))
-
-
-```
-
-### This map visualises the Local Moran’s I Z‑scores as a continuous surface. Red wards exhibit strong positive spatial autocorrelation, indicating clusters of missed settlements. Blue wards show strong negative autocorrelation, indicating clusters of well‑covered settlements. Grey wards show no significant spatial pattern. The diverging colour scheme highlights the strength and direction of spatial clustering, providing a clear and statistically grounded view of spatial performance.
-
-```{r}
-names(sett_cov_proj)
-
-class(sett_cov_proj$cluster_type)
-
-table(sett_cov_proj$cluster_type, useNA = "ifany")
-```
-
-```{r}
-sig_pts <- sett_cov_proj |>
+sig_pts <- sett_cov_proj |> 
   dplyr::filter(cluster_type != "Not Significant")
-```
-
-```{r}
-tm_shape(wards) +
-tm_polygons(
-    fill = "grey97",
-    col = "grey80",
-    lwd = 0.25
-)+
-
-tm_shape(sig_pts)+
-tm_dots(
-    col="cluster_type",
-    palette=cluster_palette,
-    size=0.8,
-    shape=16,
-    alpha=0.9
-)
-```
-
-```{r}
-nonsig <- sett_cov_proj |>
-    dplyr::filter(cluster_type=="Not Significant")
-
-sig <- sett_cov_proj |>
-    dplyr::filter(cluster_type!="Not Significant")
-```
-
-```{r}
-tm_shape(wards)+
-tm_polygons(
-    fill="grey97",
-    col="grey80"
-)+
-
-tm_shape(nonsig)+
-tm_dots(
-    col="grey75",
-    size=0.12,
-    alpha=0.20
-)+
-
-tm_shape(sig)+
-tm_dots(
-    col="cluster_type",
-    palette=cluster_palette,
-    size=0.9,
-    shape=16,
-    alpha=1
-)
-```
-
-```{r}
-
-
-tmap_mode("plot")
-
-#-------------------------------
-# Split significant and non-significant
-#-------------------------------
-
-sig_pts <- sett_cov_proj |>
-  filter(cluster_type != "Not Significant")
-
-nonsig_pts <- sett_cov_proj |>
-  filter(cluster_type == "Not Significant")
-
-#-------------------------------
-# Colour palette
-#-------------------------------
 
 cluster_palette <- c(
-
-  "High-High"="#B2182B",
-
-  "High-Low"="#EF8A62",
-
-  "Low-High"="#92C5DE",
-
-  "Low-Low"="#2166AC"
-
+  "High-High" = "#B2182B",
+  "High-Low"  = "#EF8A62",
+  "Low-High"  = "#92C5DE",
+  "Low-Low"   = "#2166AC"
 )
-```
 
-```{r}
+# Glow indicator
+sig_pts$glow <- ifelse(sig_pts$cluster_type == "High-High", "glow", "none")
 
-technical_map <-
+map_a3 <- 
+tm_shape(wards) +
+  tm_polygons(
+    fill = "grey95",
+    col  = "grey60",
+    lwd  = 0.8
+  ) +
 
-tm_shape(wards)+
+# Glow layer
+tm_shape(sig_pts |> dplyr::filter(glow == "glow")) +
+  tm_dots(
+    size = 1.2,
+    fill = "#B2182B",
+    fill_alpha = 0.25,
+    shape = 16
+  ) +
 
-tm_polygons(
+# Drop shadow layer
+tm_shape(sig_pts) +
+  tm_dots(
+    size = 0.85,
+    fill = "grey40",
+    fill_alpha = 0.3,
+    shape = 16,
+    jitter = TRUE
+  ) +
 
-    fill="#FCFCFC",
+# Main dots (tmap v4 syntax)
+tm_shape(sig_pts) +
+  tm_dots(
+    fill = "cluster_type",
+    fill.scale = tm_scale(values = cluster_palette),
+    size = 0.75,
+    size.scale = tm_scale_continuous(values = 2),
+    fill_alpha = 0.95,
+    shape = 16
+  ) +
 
-    col="grey88",
-
-    lwd=0.2
-
-)+
-
-#-------------------------------------
-# Background settlements
-#-------------------------------------
-
-tm_shape(nonsig_pts)+
-
-tm_dots(
-
-    col="grey80",
-
-    size=0.02,
-
-    alpha=0.15,
-
-    legend.show=FALSE
-
-)+
-
-#-------------------------------------
-# Significant clusters
-#-------------------------------------
-
-tm_shape(sig_pts)+
-
-tm_dots(
-
-    col="cluster_type",
-
-    palette=cluster_palette,
-
-    size=0.14,
-
-    shape=16,
-
-    alpha=1,
-
-    title="Local Moran's I Cluster"
-
-)+
-
-#-------------------------------------
-
-tm_scalebar(
-
-    position=tm_pos_in("left","bottom")
-
-)+
-
-tm_compass(
-
-    type="arrow",
-
-    position=tm_pos_in("right","top")
-
-)+
+tm_title("Spatial Clusters of Missed Settlements") +
 
 tm_layout(
+    frame = TRUE,
+    frame.lwd = 2,
+    bg.color = "white",
+    legend.outside = TRUE,
+    legend.outside.position = "right",
+    legend.frame = TRUE,
+    inner.margins = c(0.02, 0.25, 0.02, 0.02)
+) +
 
-title="Spatial Clusters of Missed Settlements",
+tm_compass(type = "8star", position = c("left", "top")) +
+tm_scalebar(position = c("left", "bottom")) +
 
-title.size=1.6,
-
-title.fontface="bold",
-
-frame=TRUE,
-
-bg.color="white",
-
-legend.outside=TRUE,
-
-legend.outside.position="right",
-
-legend.frame=TRUE,
-
-legend.title.size=1.0,
-
-legend.text.size=0.85,
-
-inner.margins=c(.03,.03,.03,.03),
-
-outer.margins=c(.03,.20,.03,.03)
-
-)
-
-```
-
-```{r}
-technical_map+
-
+# Explanation text ABOVE the scale bar
 tm_credits(
+  "This map shows statistically significant spatial clusters of missed\nsettlements identified using Local Moran’s I. High-High clusters indicate\nhotspots where missed settlements are surrounded by other missed settlements,\nsuggesting systematic operational gaps. Low-Low clusters represent areas of\nstrong coverage. Outlier clusters (High-Low, Low-High) highlight local\nanomalies requiring targeted supervision or mop-up.",
+  position = c("left", "bottom"),
+  just = c("left", "top"),
+  size = 0.9,
+  col = "grey20"
+)
 
-paste(
-
-"Data: GPS Tracks, Settlement Masterlist, Ward Boundaries",
-
-"\nMethod: Local Moran's I",
-
-"\nWeights: Queen Contiguity",
-
-"\nSignificance: p < 0.05",
-
-"\nProjection: WGS84 / UTM",
-
-"\nProduced: August 2026"
-
-),
-
-position=c("RIGHT","BOTTOM"),
-
-size=.55
-
+# Export to A3 PDF
+tmap_save(
+  map_a3,
+  filename = "missed_settlements_clusters_A3_presentation.pdf",
+  width = 42,
+  height = 29.7,
+  units = "cm",
+  dpi = 600
 )
 
 ```
 
+## Visualisation of Facets with names of localities.
+
 ```{r}
-tmap_save(
-
-technical_map,
-
-"Figure6_Local_Moran_Clusters_A3.pdf",
-
-width=16.54,
-
-height=11.69,
-
-units="in",
-
-dpi=600
+tm_shape(sig_pts) +
+  tm_dots(
+    col     = "cluster_type",
+    palette = cluster_palette,
+    size    = 0.85,   # bigger base size
+    scale   = 4       # BOOST size after tmap scaling
+  ) +
+tm_facets(
+    by = "ward_name",
+    panel.labels = FALSE   # remove ward names
 )
 ```
 
 ```{r}
 library(tmap)
-library(RColorBrewer)
 
-# ------------------------------------------------------------
-# 1. TMAP SETTINGS FOR CLEAN CARTOGRAPHY
-# ------------------------------------------------------------
 tmap_mode("plot")
-tmap_options(
-  component.autoscale = TRUE,      # allow gentle autoscaling
-  legend.text.size = 0.8,
-  legend.title.size = 1.0
+
+sig_pts <- sett_cov_proj |> 
+  dplyr::filter(cluster_type != "Not Significant")
+
+cluster_palette <- c(
+  "High-High" = "#B2182B",
+  "High-Low"  = "#EF8A62",
+  "Low-High"  = "#92C5DE",
+  "Low-Low"   = "#2166AC"
 )
 
-# ------------------------------------------------------------
-# 2. STATISTICAL BREAKPOINTS (CASA STANDARD)
-# ------------------------------------------------------------
-breaks1 <- c(-1000, -2.58, -1.96, -1.65, 1.65, 1.96, 2.58, 1000)
+# Glow indicator
+sig_pts$glow <- ifelse(sig_pts$cluster_type == "High-High", "glow", "none")
 
-# ------------------------------------------------------------
-# 3. DIVERGING PALETTE (CASA STANDARD)
-# ------------------------------------------------------------
-MoranColours <- rev(brewer.pal(7, "RdGy"))
-
-# ------------------------------------------------------------
-# 4. FINAL CARTOGRAPHIC MAP
-# ------------------------------------------------------------
-tm_shape(wards_Z) +
+map_a3 <- 
+tm_shape(wards) +
   tm_polygons(
-    col = "Z_Ii_mean",
-    palette = MoranColours,
-    style = "fixed",
-    breaks = breaks1,
-    title = "Local Moran's I (Z-score)",
-    border.col = "black",      # crisp ward boundaries
-    border.lwd = 0.6
+    fill = "grey95",
+    col  = "grey60",
+    lwd  = 0.8
   ) +
-  tm_layout(
-    title = "Spatial Autocorrelation of Settlement Coverage (Local Moran’s I)",
-    title.size = 1.2,
+
+# Glow layer
+tm_shape(sig_pts |> dplyr::filter(glow == "glow")) +
+  tm_dots(
+    size = 1.2,
+    fill = "#B2182B",
+    fill_alpha = 0.25,
+    shape = 16
+  ) +
+
+# Drop shadow layer
+tm_shape(sig_pts) +
+  tm_dots(
+    size  = 0.85,
+    fill  = "grey40",
+    fill_alpha = 0.3,
+    shape = 16,
+    jitter = TRUE
+  ) +
+
+# Main dots
+tm_shape(sig_pts) +
+  tm_dots(
+    fill = "cluster_type",
+    fill.scale = tm_scale(values = cluster_palette),
+    size = 0.75,
+    size.scale = tm_scale_continuous(values = 2),
+    fill_alpha = 0.95,
+    shape = 16
+  ) +
+
+# Title (tmap v4)
+tm_title(
+  text = "Spatial Clusters of Missed Settlements",
+  size = 2.0,
+  fontface = "bold"
+) +
+
+tm_layout(
+    frame = TRUE,
+    frame.lwd = 2,
+    bg.color = "white",
     legend.outside = TRUE,
     legend.outside.position = "right",
-    legend.bg.color = "white",
     legend.frame = TRUE,
-    frame = FALSE,
-    bg.color = "white",
-    inner.margins = c(0.02, 0.02, 0.02, 0.02),
-    outer.margins = c(0.02, 0.25, 0.02, 0.02)   # extra space for legend
-  ) +
-  tm_scale_bar(position = c("left", "bottom")) +
-  tm_compass(type = "8star", position = c("right", "top"))
+    legend.title = NULL,          # remove “cluster_type”
+    inner.margins = c(0.02, 0.25, 0.10, 0.02)  # extra bottom margin for text
+) +
+
+tm_compass(type = "8star", position = c("left", "top")) +
+tm_scalebar(position = c("left", "bottom")) +
+
+# ⭐ Explanation text positioned EXACTLY above the scale bar
+tm_credits(
+  "This map visualises statistically significant spatial clusters of missed\nsettlements identified using Local Moran’s I. High-High clusters represent\nhotspots where missed settlements are surrounded by other missed settlements,\nindicating systematic operational gaps. Low-Low clusters show areas of strong\ncoverage. Outlier clusters (High-Low, Low-High) reveal local anomalies that may\nrequire targeted supervision or mop-up.",
+  position = c("left", "bottom"),
+  just = c("left", "bottom"),   # aligns text ABOVE scale bar
+  size = 0.9,
+  col = "grey20",
+  padding = c(0.5, 0.5, 0.5, 0.5) # cleaner text block
+)
+
+# Export to A3 PDF
+tmap_save(
+  map_a3,
+  filename = "missed_settlements_clusters_A3_presentation_refined.pdf",
+  width = 42,
+  height = 29.7,
+  units = "cm",
+  dpi = 600
+)
 
 ```
 
 ```{r}
-library(sf)
-library(spatstat)
+library(tmap)
 
-# ------------------------------------------------------------
-# 0. CHECK THAT sett_cov_proj EXISTS
-# ------------------------------------------------------------
-if (!exists("sett_cov_proj")) {
-  stop("sett_cov_proj does not exist. Re-run the code that loads and prepares your settlement sf object.")
-}
+tmap_mode("plot")
 
-if (!exists("wards")) {
-  stop("wards does not exist. Re-run the code that loads your ward boundary sf object.")
-}
+sig_pts <- sett_cov_proj |>
+  dplyr::filter(cluster_type != "Not Significant")
 
-# ------------------------------------------------------------
-# 1. Convert sf points to spatstat ppp object
-# ------------------------------------------------------------
-coords <- st_coordinates(sett_cov_proj)
-
-# Create window from ward polygons
-win <- as.owin(st_union(wards))
-
-# Create ppp object
-sett_ppp <- ppp(
-  x = coords[,1],
-  y = coords[,2],
-  window = win
+cluster_palette <- c(
+  "High-High" = "#B2182B",
+  "High-Low"  = "#EF8A62",
+  "Low-High"  = "#92C5DE",
+  "Low-Low"   = "#2166AC"
 )
 
-# ------------------------------------------------------------
-# 2. Plot the points
-# ------------------------------------------------------------
-plot(sett_ppp,
-     pch = 16,
-     cex = 0.4,
-     main = "Settlement Locations")
+sig_pts$glow <- ifelse(sig_pts$cluster_type == "High-High", "glow", "none")
 
-# ------------------------------------------------------------
-# 3. Quadrat count (20 × 20 grid)
-# ------------------------------------------------------------
-qc <- quadratcount(sett_ppp, nx = 20, ny = 20)
+map_a3 <- 
+tm_shape(wards) +
+  tm_polygons(
+    fill = "grey95",
+    col  = "grey60",
+    lwd  = 0.8
+  ) +
 
-plot(sett_ppp,
-     pch = 16,
-     cex = 0.4,
-     main = "Quadrat Analysis of Settlements")
-plot(qc, add = TRUE, col = "red")
+tm_shape(sig_pts |> dplyr::filter(glow == "glow")) +
+  tm_dots(
+    size = 1.2,
+    fill = "#B2182B",
+    fill_alpha = 0.25,
+    shape = 16
+  ) +
 
-# ------------------------------------------------------------
-# 4. Chi-square test for CSR
-# ------------------------------------------------------------
-quadrat.test(sett_ppp, nx = 20, ny = 20)
+tm_shape(sig_pts) +
+  tm_dots(
+    size  = 0.85,
+    fill  = "grey40",
+    fill_alpha = 0.3,
+    shape = 16,
+    jitter = TRUE
+  ) +
 
+tm_shape(sig_pts) +
+  tm_dots(
+    fill = "cluster_type",
+    fill.scale = tm_scale(values = cluster_palette),
+    size = 0.75,
+    size.scale = tm_scale_continuous(values = 2),
+    fill_alpha = 0.95,
+    shape = 16
+  ) +
+
+tm_title(
+  text = "Spatial Clusters of Missed Settlements",
+  size = 2.0,
+  fontface = "bold"
+) +
+
+tm_layout(
+  frame = TRUE,
+  frame.lwd = 2,
+  bg.color = "white",
+  legend.outside = TRUE,
+  legend.outside.position = "right",
+  legend.frame = TRUE,
+  legend.title = NULL,
+  inner.margins = c(0.02, 0.25, 0.12, 0.02)
+) +
+
+tm_compass(type = "8star", position = c("left", "top")) +
+tm_scalebar(position = c("left", "bottom")) +
+
+tm_credits(
+  "This map visualises statistically significant spatial clusters of missed\nsettlements identified using Local Moran’s I. High-High clusters represent\nhotspots where missed settlements are surrounded by other missed settlements,\nindicating systematic operational gaps. Low-Low clusters show areas of strong\ncoverage. Outlier clusters (High-Low, Low-High) reveal local anomalies that may\nrequire targeted supervision or mop-up.",
+  position = c("left", "bottom"),
+  just = c("left", "bottom"),
+  size = 0.9,
+  col = "grey20",
+  padding = c(0.5, 0.5, 0.5, 0.5)
+)
+
+tmap_save(
+  map_a3,
+  filename = "missed_settlements_clusters_A3_presentation_refined.pdf",
+  width = 42,
+  height = 29.7,
+  units = "cm",
+  dpi = 600
+)
+
+```
+
+```{r}
+library(tmap)
+
+tmap_mode("plot")
+
+sig_pts <- sett_cov_proj |>
+  dplyr::filter(cluster_type != "Not Significant")
+
+cluster_palette <- c(
+  "High-High" = "#B2182B",
+  "High-Low"  = "#EF8A62",
+  "Low-High"  = "#92C5DE",
+  "Low-Low"   = "#2166AC"
+)
+
+sig_pts$glow <- ifelse(sig_pts$cluster_type == "High-High", TRUE, FALSE)
+
+map_a3 <- 
+tm_shape(wards) +
+  tm_polygons(
+    fill = "grey95",
+    col  = "grey60",
+    lwd  = 0.8
+  ) +
+
+# Glow layer
+tm_shape(sig_pts |> dplyr::filter(glow)) +
+  tm_dots(
+    size = 1.2,
+    fill = "#B2182B",
+    fill_alpha = 0.25,
+    shape = 16
+  ) +
+
+# Shadow layer
+tm_shape(sig_pts) +
+  tm_dots(
+    size  = 0.85,
+    fill  = "grey40",
+    fill_alpha = 0.3,
+    shape = 16,
+    jitter = TRUE
+  ) +
+
+# Main dots
+tm_shape(sig_pts) +
+  tm_dots(
+    fill = "cluster_type",
+    fill.scale = tm_scale(values = cluster_palette),
+    size = 0.75,
+    size.scale = tm_scale_continuous(values = 2),
+    fill_alpha = 0.95,
+    shape = 16
+  ) +
+
+tm_title(
+  text = "Spatial Clusters of Missed Settlements",
+  size = 2.0,
+  fontface = "bold"
+) +
+
+tm_layout(
+  frame = TRUE,
+  frame.lwd = 2,
+  bg.color = "white",
+  legend.outside = TRUE,
+  legend.outside.position = "right",
+  legend.frame = TRUE
+) +
+
+tm_compass(type = "8star", position = c("left", "top")) +
+tm_scalebar(position = c("left", "bottom")) +
+
+tm_credits(
+  "This map visualises statistically significant spatial clusters of missed\nsettlements identified using Local Moran’s I. High-High clusters represent\nhotspots where missed settlements are surrounded by other missed settlements,\nindicating systematic operational gaps. Low-Low clusters show areas of strong\ncoverage. Outlier clusters (High-Low, Low-High) reveal local anomalies that may\nrequire targeted supervision or mop-up.",
+  position = c("left", "bottom"),
+  just = c("left", "top"),
+  size = 0.9,
+  col = "grey20"
+)
+
+tmap_save(
+  map_a3,
+  filename = "missed_settlements_clusters_A3_presentation_refined.pdf",
+  width = 42,
+  height = 29.7,
+  units = "cm",
+  dpi = 600
+)
+
+```
+
+## Advance viusalisation
+
+```{r}
+
+tmap_mode("plot")
+
+# Project data (optional but recommended for presentation maps)
+wards_proj   <- st_transform(wards, 32632)
+sig_pts_proj <- st_transform(sig_pts, 32632)
+
+sig_pts_proj$glow <- sig_pts_proj$cluster_type == "High-High"
+
+cluster_palette <- c(
+  "High-High" = "#B2182B",
+  "High-Low"  = "#EF8A62",
+  "Low-High"  = "#92C5DE",
+  "Low-Low"   = "#2166AC"
+)
+
+map_a3 <- 
+tm_shape(wards_proj) +
+  tm_polygons(
+    fill = "grey95",
+    col  = "grey60",
+    lwd  = 0.8
+  ) +
+
+tm_shape(sig_pts_proj |> dplyr::filter(glow)) +
+  tm_dots(
+    size = 1.2,
+    fill = "#B2182B",
+    fill_alpha = 0.25,
+    shape = 16
+  ) +
+
+tm_shape(sig_pts_proj) +
+  tm_dots(
+    size  = 0.85,
+    fill  = "grey40",
+    fill_alpha = 0.3,
+    shape = 16,
+    jitter = TRUE
+  ) +
+
+tm_shape(sig_pts_proj) +
+  tm_dots(
+    fill = "cluster_type",
+    fill.scale = tm_scale(values = cluster_palette),
+    size = 0.75,
+    size.scale = tm_scale_continuous(values = 2),
+    fill_alpha = 0.95,
+    shape = 16
+  ) +
+
+# ⭐ Correct tmap v4 grid lines
+tm_grid(
+  col = "grey80",
+  lwd = 0.6,
+  labels.size = 0.8
+) +
+
+tm_title(
+  text = "Spatial Clusters of Missed Settlements",
+  size = 2.0,
+  fontface = "bold"
+) +
+
+tm_layout(
+  frame = TRUE,
+  frame.lwd = 2,
+  bg.color = "white",
+  legend.outside = TRUE,
+  legend.outside.position = "right",
+  legend.frame = TRUE
+) +
+
+tm_compass(type = "8star", position = c("left", "top")) +
+tm_scalebar(position = c("left", "bottom")) +
+
+tm_credits(
+  "This map visualises statistically significant spatial clusters of missed\nsettlements identified using Local Moran’s I. High-High clusters represent\nhotspots where missed settlements are surrounded by other missed settlements,\nindicating systematic operational gaps. Low-Low clusters show areas of strong\ncoverage. Outlier clusters (High-Low, Low-High) reveal local anomalies that may\nrequire targeted supervision or mop-up.",
+  position = c("left", "bottom"),
+  just = c("left", "top"),
+  size = 0.9,
+  col = "grey20"
+)
+
+tmap_save(
+  map_a3,
+  filename = "missed_settlements_clusters_A3_final.pdf",
+  width = 42,
+  height = 29.7,
+  units = "cm",
+  dpi = 600
+)
 
 
 ```
 
-```         
-```
+# **Summary of Mapping Workflow and Spatial Analysis**
+
+This notebook documents a complete geospatial workflow for analysing and visualising **missed settlements** during an immunisation campaign. The process integrates spatial data engineering, cluster detection, cartographic design, and high‑quality map production using *sf*, *dplyr*, *spatstat*, and *tmap v4*.
+
+### **1. Data Loading and Preparation**
+
+-   Imported multiple layers from a GeoPackage: **settlements**, **gps tracks**, **wards**, **LGAs**, and **state boundaries**.
+
+-   Verified geometry types, CRS consistency, and bounding boxes.
+
+-   Cleaned and attributed GPS tracks, including QA flags for gaps, stationary points, and accuracy.
+
+-   Joined settlement‑level operational data (visits, doses, target population) to spatial layers.
+
+### **2. Spatial Coverage & Cluster Analysis**
+
+-   Identified **covered vs missed settlements** using both GPS tracks and eTally data.
+
+-   Computed agreement categories: *track-only*, *etally-only*, *both-covered*, *neither-covered*.
+
+-   Performed **Local Moran’s I** to detect spatial clusters of missed settlements:
+
+    -   **High‑High** (hotspots)
+
+    -   **Low‑Low** (strong coverage)
+
+    -   **High‑Low / Low‑High** (outliers)
+
+-   Filtered significant clusters for mapping.
+
+### **3. Cartographic Design (tmap v4)**
+
+Created a publication‑grade map with:
+
+-   **Soft grey basemap** for wards.
+
+-   **Ward boundary styling** with controlled line weight.
+
+-   **Large cluster dots** with a custom colour palette.
+
+-   **Glow effect** behind High‑High hotspots.
+
+-   **Drop shadows** behind all points for depth.
+
+-   **Legend redesign**, external placement, and clean framing.
+
+-   **North arrow** and **scalebar** for cartographic completeness.
+
+-   **Inset map** zooming into hotspot areas using `tm_inset()` and `tm_viewport()`.
+
+-   **Hotspot bounding box** on the main map for spatial reference.
+
+-   **Grid lines** using `tm_grid()` (tmap v4‑compatible).
+
+-   **Explanatory text block** summarising what the map reveals.
+
+### **4. Coordinate Reference System Handling**
+
+-   Reprojected all layers to **UTM Zone 32N (EPSG:32632)** for:
+
+    -   Accurate distance representation,
+
+    -   Proper grid line rendering,
+
+    -   Stable inset map behaviour.
+
+### **5. High‑Resolution A3 Map Export**
+
+-   Produced a **42 × 29.7 cm A3 PDF** at **600 DPI**, suitable for:
+
+    -   Presentations,
+
+    -   Reports,
+
+    -   Operational briefings,
+
+    -   Publication‑quality outputs.
+
+### **6. Key Insights Revealed**
+
+-   High‑High clusters highlight **systematic operational gaps** where missed settlements cluster spatially.
+
+-   Outlier clusters (High‑Low, Low‑High) indicate **localised anomalies** requiring targeted supervision.
+
+-   Low‑Low clusters confirm **strong coverage zones**.
+
+-   The inset map and bounding box provide **focused situational awareness** of hotspot areas.
