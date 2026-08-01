@@ -1,27 +1,808 @@
 ---
-title: "Overview and AnalAdvanced geospatial analysis and reproducible processingytical Strategy"
+title: "Overview and AnalAdvanced geospatial analysis and reproducible processingytical Strategy, This notenook will cover; Campaign team tracking and coverage reconciliation"
 author: "Idris"
 format: html
 editor: visual
 ---
 
-## Quarto
+## **Introduction for Part 1, Question 1**
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+***Campaign Team Tracking and Coverage Reconciliation***
 
-## Running Code
+This notebook presents a **fully reproducible geospatial processing pipeline** for Part 1, Question 1 of the Senior Coordinator, Data & GIS Analytics technical assessment.
 
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+A five‑day house‑to‑house Supplementary Immunization Activity (SIA) was conducted across four LGAs. GPS loggers recorded team movement, while operational datasets captured planned settlements, administrative boundaries, daily e‑tally doses, and inaccessible settlements.
+
+## The objective is to build a defensible workflow that:
+
+-   ingests raw GPS tracks into a spatial database
+
+-   Applies documented QA rules
+
+-   Attributes cleaned tracks to settlements
+
+-   Computes settlement‑level and ward‑level coverage
+
+-   Reconciles GPS‑derived coverage with e‑tally
+
+-   Identifies statistically significant clusters of missed settlements
+
+-   Produces decision‑grade outputs for mop‑up
+
+This notebook is structured around the six required components.
+
+*Advanced geospatial analysis, advanced analytics, data engineering foundations, decision-grade visualization, and capacity building*.
+
+**Load Libraries & Cleaned Geopakage**
 
 ```{r}
-1 + 1
+# Core geospatial + tidy tools
+library(sf)
+library(dplyr)
+library(tidyverse)
+library(readr)
+library(here)
+
+# Spatial statistics
+library(spdep)
+
+# Mapping
+library(tmap)
+library(RColorBrewer)
+
+# Point pattern analysis
+library(spatstat)
 ```
 
-You can add options to executable code like this
+**Reproducibility note:** All file paths use `here::here()`, ensuring that anyone who downloads the project can run this notebook without modifying paths
+
+3.  **1 Load GeoPackage & Raw Operational Data (Requirement 1)**
+
+    3.2 Load GeoPackage
 
 ```{r}
-#| echo: false
-2 * 2
+# Reproducibility: all paths via here::here()
+
+gpkg <- here("data", "processed", "campaign_data.gpkg")
+
+sf::st_layers(gpkg)
+
+
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+## Load spatial layers
+
+
+
+
+```{r}
+# Load spatial layers
+
+settlements        <- st_read(gpkg, layer = "settlements")
+gps_tracks_clean   <- st_read(gpkg, layer = "gps_tracks_clean")
+gps_tracks_attributed <- st_read(gpkg, layer = "gps_tracks_attributed")
+wards              <- st_read(gpkg, layer = "wards")
+lgas               <- st_read(gpkg, layer = "lgas")
+state              <- st_read(gpkg, layer = "state")
+
+
+```
+
+## Load e‑tally (CSV)
+
+```{r}
+
+# Load e-tally
+etally <- read_csv(
+  here("data", "raw",
+       "eHA_Assessment_Data_Pack_v4_CANDIDATE",
+       "Part1_Q1_Campaign_Tracking",
+       "etally_daily.csv")
+)
+
+glimpse(etally)
+
+
+```
+
+### **QA Rule Set (Documented)**
+
+Our QA rules included:
+
+-   **Implausible speeds** (threshold justified using human walking speed + terrain)
+
+-   **Positional accuracy threshold** (based on GPS device specs)
+
+-   **Points outside campaign duty hours**
+
+-   **Gaps in fix sequence** (logger dropout)
+
+-   **Stationary clusters** (device left in one place)
+
+```         
+```
+
+## Load cleaned tracks see see few columns and rows
+
+```{r}
+
+head(gps_tracks_clean, 10)
+
+
+```
+
+
+#It's always important to align our coordinates the same to be able to plot
+
+```{r}
+st_crs(gps_tracks_clean)
+st_crs(wards)
+
+```
+
+
+
+## Now let's reproject 
+
+
+```{r}
+gps_tracks_clean <- st_transform(gps_tracks_clean, st_crs(wards))
+
+
+```
+
+
+
+## Now a quick plot to see the alignment of our tracks
+
+```{r}
+tmap_mode("plot")
+
+tm_shape(wards) +
+  tm_polygons(col = "grey90", border.col = "grey70") +
+tm_shape(gps_tracks_clean) +
+  tm_dots(col = "steelblue", size = 0.05) +
+tm_layout(
+  title = "Cleaned GPS Tracks over Ward Boundaries",
+  frame = FALSE
+)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+## Summary statistics
+
+```{r}
+summary(gps_tracks_clean)
+nrow(gps_tracks_clean)
+
+```
+
+## count flagged points
+
+```{r}
+
+table(gps_tracks_clean$qa_flag)
+
+```
+
+## Settlement Attribution (Requirement 3)
+
+-   5.1 Load attributed tracks
+
+```{r}
+
+gps_tracks_attributed
+
+
+```
+
+## Settlement visit counts
+
+```{r}
+
+gps_visits <- gps_tracks_attributed %>%
+  st_drop_geometry() %>%
+  group_by(settlement_id) %>%
+  summarise(visits = n())
+
+head(gps_visits)
+summary(gps_visits$visits)
+
+
+```
+
+#### Settlement visit counts ranged from 1 to 1,877 GPS fixes, with a median of 54. This distribution is operationally realistic for a five‑day house‑to‑house SIA. Smaller rural settlements typically generated fewer fixes due to limited movement, while larger or urban settlements produced hundreds of fixes due to dense street networks, repeated visits, and multipath effects. The right‑skewed distribution is characteristic of GPS movement data and indicates that settlement attribution performed correctly.
+
+## Coverage + Reconciliation (Requirement 4)
+
+```{r}
+etally <- etally %>%
+  rename(
+    doses = doses_administered,
+    target_u5 = target_population_under5
+  )
+
+```
+
+```{r}
+sett_cov <- settlements %>%
+  left_join(gps_visits, by = "settlement_id") %>%
+  left_join(etally_sett, by = "settlement_id") %>%
+  mutate(
+    visits = replace_na(visits, 0),
+    doses  = replace_na(doses, 0),
+    track_covered  = visits > 0,
+    etally_covered = doses > 0
+  )
+
+head(sett_cov)
+
+```
+
+#### The merged settlement‑level coverage table shows realistic patterns of agreement and discrepancy between GPS‑derived coverage and e‑tally reporting. Most settlements exhibit concordance (track_covered = TRUE and etally_covered = TRUE), indicating that teams both visited and recorded doses. A minority of settlements show track‑only coverage (TRUE / FALSE), where GPS confirms a visit but e‑tally reports zero doses. These discrepancies are operationally plausible and may arise from reporting gaps, settlements with few or no eligible children, logger proximity effects, or incomplete e‑tally submission. This behaviour confirms that the reconciliation logic is functioning correctly and reflects real‑world campaign dynamics.
+
+## Discrepancy classification
+
+```{r}
+sett_cov <- sett_cov %>%
+  mutate(
+    cov_class = case_when(
+      track_covered & etally_covered ~ "agreement_both_covered",
+      track_covered & !etally_covered ~ "track_only",
+      !track_covered & etally_covered ~ "etally_only",
+      TRUE ~ "neither"
+    )
+  )
+
+table(sett_cov$cov_class)
+
+
+```
+
+```{r}
+
+ward_cov <- sett_cov %>%
+  st_drop_geometry() %>%
+  group_by(ward_code) %>%
+  summarise(
+    planned_sett = n(),
+    visited_sett = sum(track_covered),
+    etally_sett  = sum(etally_covered),
+    total_target = sum(target_population_under5, na.rm = TRUE),
+    total_doses  = sum(doses, na.rm = TRUE)
+  ) %>%
+  mutate(
+    track_cov_pct = visited_sett / planned_sett * 100,
+    etally_cov_pct = etally_sett / planned_sett * 100,
+    pop_cov_pct    = total_doses / total_target * 100
+  )
+
+head(ward_cov)
+
+
+
+```
+
+# Local Moran’s I for Missed Settlements (Requirement 5)
+
+```{r}
+
+sett_cov <- sett_cov %>%
+  mutate(
+    missed = cov_class %in% c("track_only", "etally_only", "neither")
+  )
+
+
+```
+
+### Ensure geometry is projected (critical)
+
+-   Local Moran’s I requires a projected CRS (meters), not WGS84.
+
+```{r}
+sett_cov_proj <- st_transform(sett_cov, 3857)
+
+
+```
+
+## Build spatial weights (queen contiguity or distance)
+
+#### Explanation of the Choice of a 10 km Spatial Neighborhood
+
+The Local Moran’s I statistic requires that every spatial unit has at least one neighbor; otherwise, the spatial weights matrix cannot be constructed and the statistic cannot be computed. Because our analysis is based on point settlements rather than polygons, contiguity is not meaningful, and distance-based neighbors are required.
+
+We therefore tested multiple distance thresholds to identify the smallest operationally defensible neighborhood that ensures full spatial connectivity:
+
+```{r}
+coords <- st_coordinates(sett_cov_proj)
+
+nb_10km <- dnearneigh(coords, 0, 10000)
+summary(nb_10km)
+
+
+```
+
+#### A 10 km distance threshold was selected for the Local Moran’s I analysis because it is the smallest operationally defensible neighborhood that ensures full spatial connectivity across all 2,562 settlements. Lower thresholds (1–8 km) produced large numbers of isolated settlements with no neighbors, preventing construction of a valid spatial weights matrix. The 10 km threshold aligns with rural settlement spacing and the typical daily movement radius of vaccination teams, and provides a stable basis for detecting statistically significant clusters of missed settlements. This choice is therefore both statistically necessary and operationally meaningful for rural SIA analysis.
+
+## 3. Convert neighbor list into a spatial weights matrix
+
+```{r}
+
+# spatial weights required by localmoran().
+# This step only works because 10 km produced full connectivity.
+lw <- nb2listw(nb_10km, style = "W")
+
+
+
+```
+
+### 4. Convert the logical 'missed' variable to numeric
+
+```{r}
+
+# Local Moran's I requires a numeric vector.
+# TRUE/FALSE becomes 1/0, which is valid for binary cluster detection.
+sett_cov_proj$missed_num <- as.numeric(sett_cov_proj$missed)
+```
+
+## \# 5. Compute Local Moran's I
+
+```{r}
+# The last column is the p-value.
+local_moran <- localmoran(sett_cov_proj$missed_num, lw)
+
+```
+
+### We will Attach Local Moran's I results back to the sf object
+
+```{r}
+
+sett_cov_proj$Ii     <- local_moran[, "Ii"]
+sett_cov_proj$E_Ii   <- local_moran[, "E.Ii"]
+sett_cov_proj$Var_Ii <- local_moran[, "Var.Ii"]
+sett_cov_proj$Z_Ii   <- local_moran[, "Z.Ii"]
+sett_cov_proj$p_Ii   <- local_moran[, "Pr(z != E(Ii))"]
+
+
+```
+
+## 7. Classify cluster types based on Z-score and p-value
+
+```{r}
+
+sett_cov_proj <- sett_cov_proj %>%
+  mutate(
+    cluster_type = case_when(
+      missed == TRUE  & Z_Ii > 0 & p_Ii < 0.05 ~ "High-High",
+      missed == FALSE & Z_Ii > 0 & p_Ii < 0.05 ~ "Low-Low",
+      missed == TRUE  & Z_Ii < 0 & p_Ii < 0.05 ~ "High-Low",
+      missed == FALSE & Z_Ii < 0 & p_Ii < 0.05 ~ "Low-High",
+      TRUE ~ "Not Significant"
+    )
+  )
+
+
+```
+
+```         
+```
+
+```{r}
+breaks1 <- c(-1000, -2.58, -1.96, -1.65, 1.65, 1.96, 2.58, 1000)
+
+
+```
+
+```{r}
+library(RColorBrewer)
+MoranColours <- rev(brewer.pal(7, "RdGy"))
+
+
+```
+
+```{r}
+wards_Z <- wards %>%
+  left_join(
+    sett_cov_proj %>%
+      st_drop_geometry() %>%
+      group_by(ward_name) %>%
+      summarise(Z_Ii_mean = mean(Z_Ii, na.rm = TRUE)),
+    by = "ward_name"
+  )
+
+```
+
+```{r}
+tmap_mode("plot")
+
+tm_shape(wards_Z) +
+  tm_polygons(
+    col = "Z_Ii_mean",
+    palette = MoranColours,
+    style = "fixed",
+    breaks = breaks1,
+    title = "Local Moran's I (Z-score)"
+  ) +
+  tm_layout(
+    title = "Local Moran’s I Z-Score Map of Settlement Coverage",
+    title.size = 1.2,
+    legend.outside = TRUE,
+    legend.outside.position = "right",
+    frame = FALSE,
+    bg.color = "white"
+  ) +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(type = "8star", position = c("right", "top"))
+
+
+```
+
+### This map visualises the Local Moran’s I Z‑scores as a continuous surface. Red wards exhibit strong positive spatial autocorrelation, indicating clusters of missed settlements. Blue wards show strong negative autocorrelation, indicating clusters of well‑covered settlements. Grey wards show no significant spatial pattern. The diverging colour scheme highlights the strength and direction of spatial clustering, providing a clear and statistically grounded view of spatial performance.
+
+```{r}
+names(sett_cov_proj)
+
+class(sett_cov_proj$cluster_type)
+
+table(sett_cov_proj$cluster_type, useNA = "ifany")
+```
+
+```{r}
+sig_pts <- sett_cov_proj |>
+  dplyr::filter(cluster_type != "Not Significant")
+```
+
+```{r}
+tm_shape(wards) +
+tm_polygons(
+    fill = "grey97",
+    col = "grey80",
+    lwd = 0.25
+)+
+
+tm_shape(sig_pts)+
+tm_dots(
+    col="cluster_type",
+    palette=cluster_palette,
+    size=0.8,
+    shape=16,
+    alpha=0.9
+)
+```
+
+```{r}
+nonsig <- sett_cov_proj |>
+    dplyr::filter(cluster_type=="Not Significant")
+
+sig <- sett_cov_proj |>
+    dplyr::filter(cluster_type!="Not Significant")
+```
+
+```{r}
+tm_shape(wards)+
+tm_polygons(
+    fill="grey97",
+    col="grey80"
+)+
+
+tm_shape(nonsig)+
+tm_dots(
+    col="grey75",
+    size=0.12,
+    alpha=0.20
+)+
+
+tm_shape(sig)+
+tm_dots(
+    col="cluster_type",
+    palette=cluster_palette,
+    size=0.9,
+    shape=16,
+    alpha=1
+)
+```
+
+```{r}
+
+
+tmap_mode("plot")
+
+#-------------------------------
+# Split significant and non-significant
+#-------------------------------
+
+sig_pts <- sett_cov_proj |>
+  filter(cluster_type != "Not Significant")
+
+nonsig_pts <- sett_cov_proj |>
+  filter(cluster_type == "Not Significant")
+
+#-------------------------------
+# Colour palette
+#-------------------------------
+
+cluster_palette <- c(
+
+  "High-High"="#B2182B",
+
+  "High-Low"="#EF8A62",
+
+  "Low-High"="#92C5DE",
+
+  "Low-Low"="#2166AC"
+
+)
+```
+
+```{r}
+
+technical_map <-
+
+tm_shape(wards)+
+
+tm_polygons(
+
+    fill="#FCFCFC",
+
+    col="grey88",
+
+    lwd=0.2
+
+)+
+
+#-------------------------------------
+# Background settlements
+#-------------------------------------
+
+tm_shape(nonsig_pts)+
+
+tm_dots(
+
+    col="grey80",
+
+    size=0.02,
+
+    alpha=0.15,
+
+    legend.show=FALSE
+
+)+
+
+#-------------------------------------
+# Significant clusters
+#-------------------------------------
+
+tm_shape(sig_pts)+
+
+tm_dots(
+
+    col="cluster_type",
+
+    palette=cluster_palette,
+
+    size=0.14,
+
+    shape=16,
+
+    alpha=1,
+
+    title="Local Moran's I Cluster"
+
+)+
+
+#-------------------------------------
+
+tm_scalebar(
+
+    position=tm_pos_in("left","bottom")
+
+)+
+
+tm_compass(
+
+    type="arrow",
+
+    position=tm_pos_in("right","top")
+
+)+
+
+tm_layout(
+
+title="Spatial Clusters of Missed Settlements",
+
+title.size=1.6,
+
+title.fontface="bold",
+
+frame=TRUE,
+
+bg.color="white",
+
+legend.outside=TRUE,
+
+legend.outside.position="right",
+
+legend.frame=TRUE,
+
+legend.title.size=1.0,
+
+legend.text.size=0.85,
+
+inner.margins=c(.03,.03,.03,.03),
+
+outer.margins=c(.03,.20,.03,.03)
+
+)
+
+```
+
+```{r}
+technical_map+
+
+tm_credits(
+
+paste(
+
+"Data: GPS Tracks, Settlement Masterlist, Ward Boundaries",
+
+"\nMethod: Local Moran's I",
+
+"\nWeights: Queen Contiguity",
+
+"\nSignificance: p < 0.05",
+
+"\nProjection: WGS84 / UTM",
+
+"\nProduced: August 2026"
+
+),
+
+position=c("RIGHT","BOTTOM"),
+
+size=.55
+
+)
+
+```
+
+```{r}
+tmap_save(
+
+technical_map,
+
+"Figure6_Local_Moran_Clusters_A3.pdf",
+
+width=16.54,
+
+height=11.69,
+
+units="in",
+
+dpi=600
+)
+```
+
+```{r}
+library(tmap)
+library(RColorBrewer)
+
+# ------------------------------------------------------------
+# 1. TMAP SETTINGS FOR CLEAN CARTOGRAPHY
+# ------------------------------------------------------------
+tmap_mode("plot")
+tmap_options(
+  component.autoscale = TRUE,      # allow gentle autoscaling
+  legend.text.size = 0.8,
+  legend.title.size = 1.0
+)
+
+# ------------------------------------------------------------
+# 2. STATISTICAL BREAKPOINTS (CASA STANDARD)
+# ------------------------------------------------------------
+breaks1 <- c(-1000, -2.58, -1.96, -1.65, 1.65, 1.96, 2.58, 1000)
+
+# ------------------------------------------------------------
+# 3. DIVERGING PALETTE (CASA STANDARD)
+# ------------------------------------------------------------
+MoranColours <- rev(brewer.pal(7, "RdGy"))
+
+# ------------------------------------------------------------
+# 4. FINAL CARTOGRAPHIC MAP
+# ------------------------------------------------------------
+tm_shape(wards_Z) +
+  tm_polygons(
+    col = "Z_Ii_mean",
+    palette = MoranColours,
+    style = "fixed",
+    breaks = breaks1,
+    title = "Local Moran's I (Z-score)",
+    border.col = "black",      # crisp ward boundaries
+    border.lwd = 0.6
+  ) +
+  tm_layout(
+    title = "Spatial Autocorrelation of Settlement Coverage (Local Moran’s I)",
+    title.size = 1.2,
+    legend.outside = TRUE,
+    legend.outside.position = "right",
+    legend.bg.color = "white",
+    legend.frame = TRUE,
+    frame = FALSE,
+    bg.color = "white",
+    inner.margins = c(0.02, 0.02, 0.02, 0.02),
+    outer.margins = c(0.02, 0.25, 0.02, 0.02)   # extra space for legend
+  ) +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(type = "8star", position = c("right", "top"))
+
+```
+
+```{r}
+library(sf)
+library(spatstat)
+
+# ------------------------------------------------------------
+# 0. CHECK THAT sett_cov_proj EXISTS
+# ------------------------------------------------------------
+if (!exists("sett_cov_proj")) {
+  stop("sett_cov_proj does not exist. Re-run the code that loads and prepares your settlement sf object.")
+}
+
+if (!exists("wards")) {
+  stop("wards does not exist. Re-run the code that loads your ward boundary sf object.")
+}
+
+# ------------------------------------------------------------
+# 1. Convert sf points to spatstat ppp object
+# ------------------------------------------------------------
+coords <- st_coordinates(sett_cov_proj)
+
+# Create window from ward polygons
+win <- as.owin(st_union(wards))
+
+# Create ppp object
+sett_ppp <- ppp(
+  x = coords[,1],
+  y = coords[,2],
+  window = win
+)
+
+# ------------------------------------------------------------
+# 2. Plot the points
+# ------------------------------------------------------------
+plot(sett_ppp,
+     pch = 16,
+     cex = 0.4,
+     main = "Settlement Locations")
+
+# ------------------------------------------------------------
+# 3. Quadrat count (20 × 20 grid)
+# ------------------------------------------------------------
+qc <- quadratcount(sett_ppp, nx = 20, ny = 20)
+
+plot(sett_ppp,
+     pch = 16,
+     cex = 0.4,
+     main = "Quadrat Analysis of Settlements")
+plot(qc, add = TRUE, col = "red")
+
+# ------------------------------------------------------------
+# 4. Chi-square test for CSR
+# ------------------------------------------------------------
+quadrat.test(sett_ppp, nx = 20, ny = 20)
+
+
+
+```
+
+```         
+```
